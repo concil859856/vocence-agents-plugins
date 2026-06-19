@@ -26,7 +26,7 @@ See https://www.vocence.ai/docs/sdk-agents for the full guide.
 """
 from __future__ import annotations
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 from .tts import VocenceTTS
 from .stt import VocenceSTT

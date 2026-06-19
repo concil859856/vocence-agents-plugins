@@ -17,7 +17,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlparse
 
 import aiohttp
@@ -109,6 +109,26 @@ class VocenceSTT(STT):
         self._reader_task: asyncio.Task | None = None
         self._connect_lock = asyncio.Lock()
         self._closed = False
+
+    # ----- public binding hooks -------------------------------------------
+
+    def on_transcript(
+        self,
+        callback: "Callable[[Any], Awaitable[None]] | Callable[[Any], None]",
+    ) -> None:
+        """Bind a callback invoked with each transcript event.
+
+        The callback receives an ``STTResponse`` from the framework's
+        STT base class: ``event.event_type`` is one of ``INTERIM``,
+        ``FINAL``, ``SPEECH_START``, ``SPEECH_END``; ``event.data.text``
+        carries the recognized text (empty for VAD events).
+
+        Both sync and async callbacks are accepted. Internally this
+        sets the same private callback slot the framework's pipeline
+        uses (``_transcript_callback``) — exposing it publicly so
+        BYO-pipeline users have a non-underscore API to bind against.
+        """
+        self._transcript_callback = callback
 
     # ----- abstract overrides ---------------------------------------------
 

@@ -42,6 +42,8 @@ The plug-ins handle the WebSocket lifecycle, reconnection, and audio framing —
 
 A real-time voice agent is a loop: capture mic audio → recognize speech → run an LLM → speak the reply → repeat, with barge-in support so the user can interrupt mid-reply. `VocenceSTT` covers the recognition side, `VocenceTTS` covers synthesis; you bring (or reuse a framework for) the mic capture, the LLM call, and the audio playback.
 
+The plug-ins expose **two surfaces**: a high-level streaming API (`stream_synthesize` / `stream_transcribe`) that yields bytes or transcript events directly — recommended for BYO pipelines — and a lower-level `synthesize` / `process_audio` API that integrates with framework-managed audio tracks (used when you wire the plug-ins into the `videosdk-agents` Pipeline class).
+
 ```python
 import asyncio
 from vocence_plugins import VocenceTTS, VocenceSTT
@@ -55,57 +57,64 @@ async def main() -> None:
     stt = VocenceSTT(language="English")
 
     # ---------------------------------------------------------------
-    # 2. STT side — push captured mic frames in, get transcripts out.
+    # 2. TTS — text in, 24 kHz PCM frames out, no audio_track needed.
     # ---------------------------------------------------------------
-    # Bind a transcript callback. Events arrive in the standard
-    # {event_type, data: {text, language, ...}} envelope. event_type
-    # is INTERIM (live caption), FINAL (committed utterance), or one
-    # of the VAD events (SPEECH_START / SPEECH_END) when vad_events
-    # is on. In a real pipeline this callback drives turn-taking:
-    # on FINAL → run the LLM → speak the reply.
+    # ``stream_synthesize`` takes an async iterator of text and yields
+    # raw bytes. No need to wire up an audio_track — the framework's
+    # mock track captures frames internally and pipes them straight
+    # to you. Hand each chunk to your speaker / WebSocket / recorder.
+    async def reply_stream():
+        # Plain string: wrap in a single-yield generator.
+        yield "Hi there — how can I help you today?"
+    async for pcm_chunk in tts.stream_synthesize(reply_stream()):
+        # 24 kHz mono PCM16LE. Hand to your audio sink:
+        play_or_forward(pcm_chunk)
+
+    # For live LLM streaming (first audio plays before LLM finishes),
+    # the iterator can yield tokens as they arrive:
+    async def token_stream():
+        async for token in your_llm.stream("Tell me a joke"):
+            yield token
+    async for pcm_chunk in tts.stream_synthesize(token_stream()):
+        play_or_forward(pcm_chunk)
+
+    # ---------------------------------------------------------------
+    # 3. STT — bind a callback, then push captured mic frames in.
+    # ---------------------------------------------------------------
+    # Events arrive as the standard STTResponse envelope:
+    #   event.event_type ∈ {INTERIM, FINAL, SPEECH_START, SPEECH_END}
+    #   event.data.text  → recognized text (empty for VAD events)
+    # In a real pipeline this callback drives turn-taking: on FINAL,
+    # run the LLM and synthesize the reply.
     async def on_transcript(event):
         if event.event_type.name == "FINAL":
             user_text = event.data.text
             print("user said:", user_text)
-            # Hand off to whatever LLM you're running. The reply is
-            # then synthesized by the TTS half below.
-            reply = await your_llm.complete(user_text)
-            await tts.synthesize(reply)
+            # Hand off to your LLM + TTS loop here.
 
-    stt._transcript_callback = on_transcript
+    stt.on_transcript(on_transcript)
 
     # Feed PCM16LE @ 16 kHz mono frames from your mic. Typical frame
     # cadence is 20–40 ms; the hot path is just an awaited byte send.
-    # Replace this stub with your real capture loop (sounddevice,
-    # PyAudio, browser WebSocket forward, etc.).
+    # Replace this stub with your real capture (sounddevice, PyAudio,
+    # browser WebSocket forward, etc.).
     async for frame in capture_mic_at_16k_mono_pcm16le():
         await stt.process_audio(frame)
-        # End-of-utterance signal? Ask the pod to commit immediately
-        # instead of waiting for its silence timer:
+        # Explicit end-of-utterance signal? Ask the pod to commit
+        # immediately instead of waiting for its silence timer:
         if user_pressed_enter():
             await stt.flush()
 
-    # ---------------------------------------------------------------
-    # 3. TTS side — push text in, get 24 kHz PCM frames out.
-    # ---------------------------------------------------------------
-    # synthesize() pushes PCM frames to tts.audio_track as they
-    # arrive from the pod. Wire your speaker output (or a WebSocket
-    # forward, or a recorder) into tts.audio_track BEFORE calling
-    # synthesize. Most pipeline frameworks expose
-    # audio_track.add_sink(callable) — see your framework's docs.
-
-    # Plain string:
-    await tts.synthesize("Hi there — how can I help you today?")
-
-    # Or an async iterator of token chunks for live LLM streaming,
-    # so the first audio plays before the LLM has finished generating:
-    async def token_stream():
-        for token in ["Sure, ", "let me ", "check that ", "for you."]:
-            yield token
-    await tts.synthesize(token_stream())
+    # Alternative: ``stream_transcribe`` returns transcript events as
+    # an async iterator instead of via callback — pick whichever shape
+    # fits your loop better.
+    #
+    # async for event in stt.stream_transcribe(mic_frame_stream()):
+    #     if event.event_type.name == "FINAL":
+    #         ...
 
     # ---------------------------------------------------------------
-    # 4. Barge-in — cancel an in-flight reply when the user speaks.
+    # 4. Barge-in — cancel an in-flight TTS reply when the user speaks.
     # ---------------------------------------------------------------
     # Call this from your VAD / interrupt detector the moment the
     # user starts talking over the agent. The WebSocket stays warm
@@ -129,6 +138,14 @@ The full orchestration — capturing the mic, running VAD locally, deciding when
 |---|---|---|
 | `VocenceTTS` | out (pod → your sink) | PCM16LE, 24 kHz, mono |
 | `VocenceSTT` | in (your mic → pod) | PCM16LE, 16 kHz, mono |
+
+### Pipeline-wrapped use (`videosdk-agents`)
+
+When you wire the plug-ins into the `videosdk-agents` `Pipeline` class instead of orchestrating yourself, that framework provides the `audio_track` automatically and calls `synthesize(text)` / `process_audio(frame)` for you. You still build the components the same way; you just don't need `stream_synthesize` / `stream_transcribe` / `on_transcript`. See the [videosdk-agents docs](https://pypi.org/project/videosdk-agents/) for the pipeline assembly.
+
+### Python version
+
+The plug-ins require **Python ≥ 3.11** (inherited from `videosdk-agents`, which uses 3.11-only syntax). On Debian / Ubuntu 22.04 the default `python3` is 3.10 — install 3.11+ first (e.g. `apt install python3.11`) and create your venv from it.
 
 ## Plugin reference
 

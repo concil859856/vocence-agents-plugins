@@ -32,9 +32,9 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://www.vocence.ai"
-Documentation = "https://www.vocence.ai/docs/sdk-agents"
-Repository = "https://github.com/concil859856/vocence-plugins"
-Issues = "https://github.com/concil859856/vocence-plugins/issues"
+Documentation = "https://www.vocence.ai/docs/sdk-plugins"
+Repository = "https://github.com/concil859856/vocence-agents-plugins"
+Issues = "https://github.com/concil859856/vocence-agents-plugins/issues"
 
 [tool.hatch.version]
 path = "src/vocence_plugins/__init__.py"
